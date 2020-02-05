@@ -125,6 +125,24 @@ class AndroidDriver extends DeviceDriverBase {
     // Other payload content types are not yet supported.
   }
 
+  async waitUntilReady() {
+    let intervalId;
+    try {
+        await Promise.race([
+          super.waitUntilReady(),
+          new Promise((resolve, reject) => {
+            intervalId = setInterval(() => {
+              if (!this.instrumentationProcess) {
+                reject('Failed to instrument application on the device!\n' + this.instrumentationStackTrace);
+              }
+            }, 100);
+          }),
+        ]);
+    } finally {
+      !_.isUndefined(intervalId) && clearInterval(intervalId);
+    }
+  }
+
   async sendToHome(deviceId, params) {
     await this.uiDevice.pressHome();
   }
@@ -217,10 +235,35 @@ class AndroidDriver extends DeviceDriverBase {
     const spawnFlags = [`-s`, `${deviceId}`, `shell`, `am`, `instrument`, `-w`, `-r`, ...launchArgs, ...additionalLaunchArgs, testRunner];
 
     this.instrumentationProcess = spawnAndLog(this.adb.adbBin, spawnFlags, { detached: false });
+    this.instrumentationProcess.childProcess.stdout.on('data', (raw) => {
+      const stackTrace = this._findAndParseInstrumentationStackTraceLog(raw.toString());
+      if (stackTrace) {
+        this.instrumentationStackTrace = stackTrace;
+      }
+    });
     this.instrumentationProcess.childProcess.on('close', async () => {
       await this._terminateInstrumentation();
       await this.adb.reverseRemove(deviceId, serverPort);
     });
+  }
+
+  _findAndParseInstrumentationStackTraceLog(text) {
+    const INSTRUMENTATION_LOGS_PREFIX = 'INSTRUMENTATION_STATUS:';
+    const STACKTRACE_PREFIX_TEXT = INSTRUMENTATION_LOGS_PREFIX + ' stack=';
+
+    let stackTrace = '';
+    if (text.includes(STACKTRACE_PREFIX_TEXT)) {
+      const lines = text.split('\n');
+
+      let i;
+      for (i = 0; i < lines.length && !lines[i].includes(STACKTRACE_PREFIX_TEXT); i++) {}
+
+      lines[i] = lines[i].replace(STACKTRACE_PREFIX_TEXT, '');
+      for (; i < lines.length && lines[i].trim() && !lines[i].includes(INSTRUMENTATION_LOGS_PREFIX); i++) {
+        stackTrace = stackTrace.concat(lines[i], '\n');
+      }
+    }
+    return stackTrace;
   }
 
   async _queryPID(deviceId, bundleId, waitAtStart = true) {
